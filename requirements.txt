@@ -1,0 +1,12 @@
+# Air Writer — pinned for the club-fair build.
+#
+# Python 3.13.  mediapipe has no 3.14 wheels for the pinned version, so the
+# system default (3.14) will not work — use 3.13 and let setup.sh handle it.
+#
+# opencv resolves to 5.0.0 here rather than the 4.13 CLAUDE.md documents; every
+# API this app uses (createCLAHE, bilateralFilter, matchTemplate, Sobel, LUT,
+# calcHist, pointPolygonTest, the bundled Haar cascades) was verified present.
+opencv-python==5.0.0.93
+mediapipe==0.10.33
+numpy==2.2.6
+pillow==12.3.0
