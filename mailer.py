@@ -72,7 +72,7 @@ def load_config(path=None):
 
 # ── HackBama brand ────────────────────────────────────────────────────
 #
-# Taken from the club site (hackbama.org): a warm, editorial, print-inspired
+# Taken from the club site: a warm, editorial, print-inspired
 # palette — bone paper, Alabama crimson, hairline rules, square corners, no
 # shadows and no glow.  Deliberately the opposite of a neon-on-black demo
 # aesthetic, so the mail reads as coming from the club rather than from a toy.
@@ -85,7 +85,11 @@ CRIMSON = "#8D1B30"       # accent, CTA
 RULE = "#D8D2C9"          # hairline dividers
 
 GROUPME = "https://groupme.com/join_group/105495989/hs26yOC2"
-SITE = "https://hackbama.org"
+# The .org in the site's metadataBase does not resolve yet; this is the live
+# deployment.  Move it when the domain is real — a dead link in mail that goes
+# to strangers is worse than an ugly one.
+SITE = "https://hackbama.vercel.app"
+SITE_LABEL = "hackbama.vercel.app"
 
 # Inter Tight and Bodoni Moda are Google Fonts and will not load in Outlook or
 # Gmail webmail, so every stack ends in something universally present.
@@ -245,7 +249,7 @@ A proposed student organization of the Department of Computer Science.
     <p style="margin:26px 0 0;font-size:13px;line-height:1.6;
      color:{INK_FAINT}">
       <a href="{SITE}" style="color:{CRIMSON};text-decoration:none">
-        hackbama.org</a><br>
+        {SITE_LABEL}</a><br>
       The University of Alabama · A proposed student organization of the
       Department of Computer Science.<br>
       You are receiving this because you asked for your portrait at our

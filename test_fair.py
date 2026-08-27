@@ -214,8 +214,12 @@ def test_message():
         check("plain text says what the club is",
               "build club at The University of Alabama" in text)
         for want in (mailer.CRIMSON, mailer.BONE, mailer.GROUPME,
-                     "hackbama.org"):
+                     mailer.SITE):
             check(f"html carries {want}", want in html)
+        # hackbama.org does not resolve; shipping it to strangers is a dead
+        # link in every message.
+        check("site link is the live deployment",
+              "hackbama.org" not in html and "hackbama.org" not in text)
         check("no leftover neon-demo palette",
               "#14121a" not in html and "#8ee6ff" not in html)
         # Club voice: the site uses no contractions anywhere.
