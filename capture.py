@@ -19,6 +19,7 @@ addresses collected so far.
 import json
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,13 @@ import numpy as np
 # Deliberately permissive: this validates shape, not deliverability, and a
 # demo should never reject someone's real address on a technicality.
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
+
+# Send lifecycle.  A record is PENDING from the moment it is written, so a
+# crash or a restart mid-fair leaves a queue to resume rather than a silent
+# hole in the address list.
+PENDING = "pending"
+SENT = "sent"
+FAILED = "failed"
 
 MAX_EMAIL = 64
 EXPORT_CELL = (14, 28)          # glyph cell for the emailed PNG
@@ -44,6 +52,7 @@ class CaptureStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.index = self.dir / "captures.json"
         self.records = self._load()
+        self._upgrade()
 
     def _load(self):
         if not self.index.exists():
@@ -67,6 +76,48 @@ class CaptureStore:
     def count(self):
         return len(self.records)
 
+    @property
+    def sent_count(self):
+        return sum(1 for r in self.records if r.get("status") == SENT)
+
+    def _upgrade(self):
+        """Give records written before send-tracking the newer fields.
+
+        An index from an earlier run is still a demo's worth of real
+        addresses; it must keep working, and its entries should be
+        recoverable by the drain script rather than stranded.
+        """
+        for r in self.records:
+            if not isinstance(r, dict):
+                continue
+            r.setdefault("id", uuid.uuid4().hex)
+            r.setdefault("status", SENT if r.get("emailed") else PENDING)
+            r.setdefault("attempts", 0)
+            r.setdefault("last_error", "")
+
+    def mark(self, rec_id, status, error=""):
+        """Record the outcome of a send attempt.  Returns the record.
+
+        Only the main thread may call this: it rewrites the index, and the
+        render loop reads these same dicts while drawing.
+        """
+        for r in self.records:
+            if r.get("id") == rec_id:
+                r["status"] = status
+                r["emailed"] = (status == SENT)
+                if status == FAILED or error:
+                    r["attempts"] = r.get("attempts", 0) + 1
+                    r["last_error"] = str(error)[:200]
+                elif status == SENT:
+                    r["last_error"] = ""
+                self._write_index()
+                return r
+        return None
+
+    def pending(self):
+        """Records still owed an email, oldest first."""
+        return [r for r in self.records if r.get("status") == PENDING]
+
     def save(self, email, idx_grid, renderer, photo=None):
         """Write the portrait + text + index entry.  Returns the record."""
         stamp = datetime.now()
@@ -84,10 +135,19 @@ class CaptureStore:
         txt.write_text(renderer.to_text(idx_grid) + "\n")
 
         rec = {
+            # Position in the list is not an identity: `base` counts from
+            # len(records), so a reset or a recovered-from-corrupt index can
+            # reissue a basename.  The sender needs something stable to mark.
+            "id": uuid.uuid4().hex,
             "email": email.strip(),
             "captured_at": stamp.isoformat(timespec="seconds"),
             "image": png.name,
             "text": txt.name,
+            "status": PENDING,
+            "attempts": 0,
+            "last_error": "",
+            # Kept as a mirror of status == SENT so anything reading the
+            # original shape still works.
             "emailed": False,
         }
         if photo is not None:
