@@ -684,12 +684,26 @@ def main():
         if fld is not None and fld.active and key != 255:
             act = fld.key(key)
             if act == "submit":
-                if capture.valid_email(fld.text):
-                    r_ = store.save(fld.text, sub_.idx, ascii_r, sub_.photo)
-                    fld.saved(f"SAVED  ·  {store.count} ON FILE")
-                    print(f"[✉️] {r_['email']} → {r_['image']}")
-                else:
+                if sub_.idx is None:
+                    # The field takes focus the moment a subject locks, which
+                    # is before the 3-2-1 has run.  Submitting here would hand
+                    # a None grid to compose() and kill the loop mid-demo.
+                    fld.error("HOLD STILL  ·  ALMOST THERE")
+                elif not capture.valid_email(fld.text):
                     fld.error("THAT DOESN'T LOOK LIKE AN EMAIL")
+                else:
+                    try:
+                        r_ = store.save(fld.text, sub_.idx, ascii_r,
+                                        sub_.photo)
+                    except OSError as e:
+                        # A full disk after a few hundred captures must not
+                        # end the demo; the address is still on screen and
+                        # ENTER can be pressed again.
+                        print(f"[!] Could not save capture: {e}")
+                        fld.error("COULDN'T SAVE  ·  PRESS ENTER TO RETRY")
+                    else:
+                        fld.saved(f"SAVED  ·  {store.count} ON FILE")
+                        print(f"[✉️] {r_['email']} → {r_['image']}")
             continue
 
         if key in (ord("q"), ord("Q"), 27):
