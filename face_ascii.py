@@ -13,7 +13,7 @@ and it will be used instead — noticeably steadier on profile views.
 
 import cv2
 import numpy as np
-import math, time
+import math, subprocess, time
 from pathlib import Path
 
 from PIL import Image as PILImage, ImageDraw
@@ -819,6 +819,7 @@ class SubjectManager:
                             if s.style == STYLE_COLOR
                             else self.r.compose_style(s.idx, s.style))
                         s.flash = now
+                        _shutter()
                 alive.append(s)
             else:
                 if s.lost_since is None:
@@ -847,6 +848,24 @@ class SubjectManager:
                 _connector(out, s.last_box, card_x, card_y, s.color, e, lost)
                 _card(out, s, card_x, card_y, now, e, lost)
             _flash(out, s, now)
+
+
+_SOUND = "/System/Library/Sounds/Pop.aiff"
+
+
+def _shutter():
+    """A camera-shutter cue, if the machine can make one.
+
+    Non-blocking, and deliberately swallowing every error: no missing file,
+    no muted machine, and no absent afplay may ever raise into the render
+    loop.  A silent demo is fine; a crashed one is not.
+    """
+    try:
+        subprocess.Popen(["afplay", "-v", "0.4", _SOUND],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def _ease(t):

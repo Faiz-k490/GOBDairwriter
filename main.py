@@ -381,6 +381,10 @@ class HandState:
         self._color_cd = 0.0
         self.stroke: list[tuple[int, int]] = []
         self.fist_since: float | None = None
+        # Recent fingertip positions, for the comet trail.  Kept on `view`
+        # rather than the canvas so it never becomes permanent ink and never
+        # ends up in a CanvasHistory snapshot.
+        self.trail: deque = deque(maxlen=14)
 
     def cycle_color(self, now):
         if now - self._color_cd < 1.0:
@@ -403,6 +407,18 @@ def neon_line(canvas, p1, p2, color, thickness=1.0):
     cv2.line(canvas, p1, p2, dim, outer, cv2.LINE_AA)
     cv2.line(canvas, p1, p2, color, inner, cv2.LINE_AA)
     cv2.line(canvas, p1, p2, (255, 255, 255), core, cv2.LINE_AA)
+
+
+def draw_trail(img, pts, color):
+    """A tapering comet behind the fingertip, so the hand reads as tracked."""
+    n = len(pts)
+    if n < 2:
+        return
+    for i in range(1, n):
+        f = i / n                       # 0 at the tail, 1 at the fingertip
+        col = tuple(int(c * (0.15 + 0.85 * f)) for c in color)
+        cv2.line(img, pts[i - 1], pts[i], col,
+                 max(1, int(1 + 5 * f)), cv2.LINE_AA)
 
 
 def rainbow_color(t):
@@ -489,6 +505,8 @@ def main():
     live_col  = False        # ... in the subject's own colours (K)
     live_view = None         # strided view of `view`, built on first use
     live_demoted = 0.0       # last time live mode was scaled back
+    last_seen = time.time()  # last frame with a hand or a locked subject
+    ATTRACT_AFTER = 20.0     # seconds of nobody before the title card
     rainbow  = False; ar_on = False
     hud_on   = True;  mirror = True
     thick    = 1.0;   hue_t  = 0.0
@@ -529,6 +547,7 @@ def main():
             canvas = ar_stab.process(frame, canvas, lm_list, w, h)
 
         # ── per-hand processing ──
+        cursors = []             # drawn after the composite, into `view`
         for hi in range(min(n_hands, 2)):
             lm = lm_list[hi]
             hs = hands[hi]
@@ -591,15 +610,17 @@ def main():
                         hs.was_drawing = False
                     hs.stroke = []
 
-                # cursor
-                cr = max(4, int(8 * thick))
-                cv2.circle(frame, (sx, sy), cr, col, -1, cv2.LINE_AA)
-                cv2.circle(frame, (sx, sy), max(2, cr//2),
-                           (255,255,255), -1, cv2.LINE_AA)
+                # The cursor is drawn later, into `view`: live ASCII replaces
+                # the camera image, and anything painted on `frame` here would
+                # simply be thrown away.
+                hs.trail.append((sx, sy))
+                cursors.append(((sx, sy), max(4, int(8 * thick)), col,
+                                list(hs.trail)))
                 parts.spawn(sx, sy, col, count=2)
             else:
                 hs.prev_pt = None
                 hs.stroke = []
+                hs.trail.clear()
                 if hs.was_drawing:
                     hs.was_drawing = False
 
@@ -672,6 +693,14 @@ def main():
             cv2.add(frame, canvas, view)
         parts.draw(view)
 
+        # Fingertip trail and cursor, over whatever the background ended up
+        # being (camera or live ASCII).
+        for pt, cr, col, trail in cursors:
+            draw_trail(view, trail, col)
+            cv2.circle(view, pt, cr, col, -1, cv2.LINE_AA)
+            cv2.circle(view, pt, max(2, cr // 2), (255, 255, 255), -1,
+                       cv2.LINE_AA)
+
         # ── send outcomes: the worker posts, the main thread writes ──
         for rec_id, st_, err, tries in sender.results():
             rec_ = store.mark(rec_id, st_, err)
@@ -708,7 +737,12 @@ def main():
                 guide_stage = "email"
         else:
             guide_stage = "draw"
-        if hud_on:
+        if n_hands or subjects.subjects:
+            last_seen = now
+        idle = now - last_seen
+        if idle > ATTRACT_AFTER:
+            hud.attract(view, now, store.count)
+        elif hud_on:
             hud.guide(view, hands, n_hands, faces.raw_count, guide_stage)
 
         # ── live mode must never be the reason the demo stutters ──

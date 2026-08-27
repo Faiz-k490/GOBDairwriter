@@ -132,6 +132,62 @@ def draw(bar, hands, n_active, palette, rainbow, rainbow_col, ar, rec,
         text(bar, s, (rx + 22, mid - 7), 11, BAD, tracking=1)
 
 
+def attract(view, t, n_captures=0):
+    """Full-screen title card for when nobody is at the booth.
+
+    A fair stand is judged from ten feet away by people walking past.  Idle
+    camera feed says nothing; this says what the thing is and what to do.
+    Any hand dismisses it instantly, so it never gets in a user's way.
+    """
+    H, W = view.shape[:2]
+
+    # Dim the live feed rather than covering it — movement behind the card is
+    # what tells a passer-by the camera is live and this is about them.
+    cv2.addWeighted(view, 0.22, np.zeros_like(view), 0, 12, view)
+
+    cx = W // 2
+    pulse = 0.55 + 0.45 * abs(math.sin(t * 1.1))
+
+    w = text_width("AIR WRITER", 62, tracking=12)
+    text(view, "AIR WRITER", (cx - w // 2, H // 2 - 150), 62,
+         (255, 238, 120), tracking=12)
+
+    sub = "DRAW IN THE AIR  ·  GET YOUR PORTRAIT"
+    w = text_width(sub, 19, tracking=5, mono=False)
+    text(view, sub, (cx - w // 2, H // 2 - 66), 19, (176, 172, 200),
+         tracking=5, mono=False)
+
+    steps = [("1", "RAISE ONE FINGER"),
+             ("2", "CIRCLE YOUR FACE"),
+             ("3", "TYPE YOUR EMAIL")]
+    # One step lit at a time: a passer-by reads the lit one, and the loop
+    # tells them there are three without asking them to read three.
+    live = int(t * 0.6) % 3
+    bw, gap = 250, 26
+    x0 = cx - (bw * 3 + gap * 2) // 2
+    for i, (num, label) in enumerate(steps):
+        x = x0 + i * (bw + gap)
+        on = i == live
+        col = (255, 238, 120) if on else (96, 92, 118)
+        pill(view, x, H // 2 + 4, bw, 74, col,
+             alpha=0.18 if on else 0.06, border=col if on else None, rad=12)
+        text(view, num, (x + 18, H // 2 + 22), 30, col)
+        w = text_width(label, 13, tracking=2)
+        text(view, label, (x + 62, H // 2 + 32), 13,
+             (240, 238, 248) if on else (128, 124, 150), tracking=2)
+
+    if n_captures:
+        c = f"{n_captures} PORTRAITS TAKEN TODAY"
+        w = text_width(c, 14, tracking=4)
+        text(view, c, (cx - w // 2, H // 2 + 122), 14, (150, 220, 180),
+             tracking=4, strength=pulse)
+
+    hint = "STEP UP  ·  THE CAMERA IS LIVE"
+    w = text_width(hint, 12, tracking=3)
+    text(view, hint, (cx - w // 2, H - 58), 12, (120, 116, 145), tracking=3,
+         strength=pulse)
+
+
 def guide(view, hands, n_active, n_faces, stage="draw"):
     """Contextual tutorial card for people seeing Air Writer cold.
 
