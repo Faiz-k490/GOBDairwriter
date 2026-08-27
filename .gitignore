@@ -4,3 +4,6 @@ recordings/
 screenshots/
 hand_landmarker.task
 .venv/
+blaze_face_short_range.tflite
+captures/
+simout/

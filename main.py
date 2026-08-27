@@ -6,8 +6,16 @@ support, particle effects, rainbow mode, and session recording.
 Gestures (per hand):
   ☝️  Point          → DRAW (pinch controls thickness)
   ✌️  Peace          → CYCLE COLOR
-  ✊  Fist           → CLEAR CANVAS
-  🖐️  Open palm      → ERASE
+  3️⃣  Three fingers  → ERASE
+  🖐️  Open palm      → IDLE / SAFE PAUSE
+  ✊  Fist           → CLEAR CANVAS + release locks
+
+Capture flow (the demo):
+  1. Draw a closed loop around someone's face.
+  2. Their ASCII portrait freezes in a card, black on nothing.
+  3. Type an email into the field, press ENTER.
+  4. Portrait + address land in captures/ so they can be mailed later.
+  5. Hold a fist to clear, and the next person steps up.
 
 Keyboard:
   S   Screenshot       R   Toggle recording (MP4 + GIF)
@@ -29,6 +37,13 @@ from collections import deque
 from pathlib import Path
 from datetime import datetime
 
+import hud
+import capture
+from face_ascii import (
+    FaceTracker, AsciiRenderer, SubjectManager,
+    closed_loop, enclosed_faces, draw_candidates,
+)
+
 try:
     from PIL import Image as PILImage
     HAS_PIL = True
@@ -40,6 +55,7 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────
 
 WINDOW_NAME = "Air Writer"
+FIST_HOLD = 0.7        # seconds a fist must be held before it wipes anything
 CAM_WIDTH, CAM_HEIGHT = 1280, 720
 MODEL_PATH = str(Path(__file__).parent / "hand_landmarker.task")
 
@@ -47,9 +63,9 @@ MODEL_PATH = str(Path(__file__).parent / "hand_landmarker.task")
 WRIST = 0
 THUMB_TIP = 4;  THUMB_IP = 3
 INDEX_TIP = 8;  INDEX_DIP = 7;  INDEX_PIP = 6;  INDEX_MCP = 5
-MIDDLE_TIP = 12; MIDDLE_DIP = 11; MIDDLE_MCP = 9
-RING_TIP = 16;  RING_DIP = 15;  RING_MCP = 13
-PINKY_TIP = 20; PINKY_DIP = 19; PINKY_MCP = 17
+MIDDLE_TIP = 12; MIDDLE_DIP = 11; MIDDLE_PIP = 10; MIDDLE_MCP = 9
+RING_TIP = 16;  RING_DIP = 15;  RING_PIP = 14;  RING_MCP = 13
+PINKY_TIP = 20; PINKY_DIP = 19; PINKY_PIP = 18; PINKY_MCP = 17
 
 # Neon palette (BGR)
 PALETTE = [
@@ -66,11 +82,6 @@ HAND_CONNECTIONS = [
     (5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),
     (13,17),(17,18),(18,19),(19,20),(0,17),
 ]
-
-COL_BG   = (15, 15, 22)
-COL_TXT  = (220, 220, 230)
-COL_DIM  = (100, 100, 120)
-
 
 # ──────────────────────────────────────────────────────────────
 # Particle system
@@ -277,29 +288,49 @@ class GestureEngine:
         self._prev = "none"; self._hold = 0; self._th = threshold
 
     @staticmethod
-    def _up(lm, tip, dip, mcp):
-        return lm[tip].y < lm[dip].y and lm[dip].y < lm[mcp].y
+    def _d(a, b):
+        return math.hypot(a.x - b.x, a.y - b.y)
 
-    @staticmethod
-    def _thumb_up(lm):
-        return abs(lm[THUMB_TIP].x - lm[WRIST].x) > 0.06
+    @classmethod
+    def _palm(cls, lm):
+        return max(1e-6, cls._d(lm[WRIST], lm[MIDDLE_MCP]))
+
+    @classmethod
+    def _extended(cls, lm, tip, pip):
+        """Is this finger out?  Rotation-invariant by construction.
+
+        An extended fingertip sits farther from the wrist than its own PIP
+        joint; a curled one folds back inside it.  Comparing image-space y
+        instead (the old test) silently inverts the moment the hand tilts
+        past horizontal, which read a genuine point as a fist.
+        """
+        w = lm[WRIST]
+        return cls._d(lm[tip], w) > cls._d(lm[pip], w) * 1.10
+
+    @classmethod
+    def _thumb_out(cls, lm):
+        return cls._d(lm[THUMB_TIP], lm[INDEX_MCP]) > cls._palm(lm) * 0.75
 
     def detect(self, lm):
-        i = self._up(lm, INDEX_TIP, INDEX_DIP, INDEX_MCP)
-        m = self._up(lm, MIDDLE_TIP, MIDDLE_DIP, MIDDLE_MCP)
-        r = self._up(lm, RING_TIP, RING_DIP, RING_MCP)
-        p = self._up(lm, PINKY_TIP, PINKY_DIP, PINKY_MCP)
-        t = self._thumb_up(lm)
-        up = sum((i, m, r, p, t))
-
+        i = self._extended(lm, INDEX_TIP, INDEX_PIP)
+        m = self._extended(lm, MIDDLE_TIP, MIDDLE_PIP)
+        r = self._extended(lm, RING_TIP, RING_PIP)
+        p = self._extended(lm, PINKY_TIP, PINKY_PIP)
+        t = self._thumb_out(lm)
         if i and not m and not r and not p:
             raw = "point"
         elif i and m and not r and not p:
             raw = "peace"
-        elif (not i and not m and not r and not p
-              and lm[INDEX_TIP].y > lm[INDEX_MCP].y):
+        elif sum((i, m, r, p)) == 3:
+            # Thumb detection is much less stable than the four long
+            # fingers, so the eraser deliberately keys off exactly three
+            # long fingers.  This stays reliable as the hand rotates.
+            raw = "three"
+        elif not (i or m or r or p):
             raw = "fist"
-        elif up >= 4:
+        elif i and m and r and p:
+            # An open hand is a safe pause.  Requiring a trustworthy thumb
+            # here made "five fingers" flicker as the palm turned sideways.
             raw = "palm"
         else:
             raw = "other"
@@ -344,6 +375,8 @@ class HandState:
         self.color = PALETTE[cidx % len(PALETTE)]
         self.was_drawing = False
         self._color_cd = 0.0
+        self.stroke: list[tuple[int, int]] = []
+        self.fist_since: float | None = None
 
     def cycle_color(self, now):
         if now - self._color_cd < 1.0:
@@ -356,21 +389,6 @@ class HandState:
 # ──────────────────────────────────────────────────────────────
 # Drawing primitives
 # ──────────────────────────────────────────────────────────────
-
-def put_text(img, txt, pos, sc=0.5, col=COL_TXT, th=1):
-    cv2.putText(img, txt, pos, cv2.FONT_HERSHEY_SIMPLEX, sc, col, th,
-                cv2.LINE_AA)
-
-def rounded_rect(img, p1, p2, color, rad=15, alpha=0.6):
-    ov = img.copy()
-    x1, y1 = p1; x2, y2 = p2
-    cv2.rectangle(ov, (x1+rad, y1), (x2-rad, y2), color, -1)
-    cv2.rectangle(ov, (x1, y1+rad), (x2, y2-rad), color, -1)
-    for cx, cy in ((x1+rad,y1+rad),(x2-rad,y1+rad),
-                   (x1+rad,y2-rad),(x2-rad,y2-rad)):
-        cv2.circle(ov, (cx, cy), rad, color, -1)
-    cv2.addWeighted(ov, alpha, img, 1-alpha, 0, img)
-
 
 def neon_line(canvas, p1, p2, color, thickness=1.0):
     """Layered glow: dim outer → bright inner → white core."""
@@ -394,69 +412,6 @@ def pinch_thickness(lm):
     d = math.hypot(lm[THUMB_TIP].x - lm[INDEX_TIP].x,
                    lm[THUMB_TIP].y - lm[INDEX_TIP].y)
     return float(np.interp(d, [0.03, 0.18], [0.3, 3.0]))
-
-
-# ──────────────────────────────────────────────────────────────
-# HUD
-# ──────────────────────────────────────────────────────────────
-
-def draw_hud(frame, w, h, hands, n_active, rainbow, ar, rec, thick, fps):
-    pw, ph = 540, 78
-    x, y = (w - pw) // 2, h - ph - 12
-    rounded_rect(frame, (x, y), (x+pw, y+ph), COL_BG, rad=18, alpha=0.65)
-    cv2.rectangle(frame, (x, y), (x+pw, y+ph), (55, 55, 70), 1, cv2.LINE_AA)
-
-    # — mode —
-    g = hands[0].ge.gesture if n_active > 0 else "none"
-    pc = hands[0].color if n_active > 0 else COL_DIM
-    labels = {"point": ("DRAW", pc), "palm": ("ERASE", (160,160,160)),
-              "fist": ("CLEAR", (80,80,255)), "peace": ("COLOR", pc)}
-    mtxt, mcol = labels.get(g, ("IDLE", COL_DIM))
-    put_text(frame, mtxt, (x+18, y+30), 0.55, mcol, 2)
-    if n_active:
-        put_text(frame, f"{n_active}H", (x+18, y+55), 0.32, COL_DIM)
-
-    # — palette dots —
-    px, py = x + 120, y + 28
-    for i, pc in enumerate(PALETTE):
-        sel = any(hs.cidx == i for hs in hands[:n_active])
-        r = 8 if sel else 5
-        cv2.circle(frame, (px + i*24, py), r, pc, -1, cv2.LINE_AA)
-        if sel:
-            cv2.circle(frame, (px + i*24, py), r+2, (255,255,255), 1,
-                       cv2.LINE_AA)
-    if rainbow:
-        put_text(frame, "RAINBOW", (px, py+22), 0.3,
-                 rainbow_color(time.time()), 1)
-
-    # — thickness bar —
-    bx, by = x + 290, y + 20
-    put_text(frame, "T", (bx, by+3), 0.35, COL_DIM)
-    bs = bx + 15; bw = 55
-    cv2.rectangle(frame, (bs, by-2), (bs+bw, by+5), (40,40,55), -1)
-    f = int(bw * min(1.0, (thick - 0.3) / 2.7))
-    cv2.rectangle(frame, (bs, by-2), (bs+f, by+5),
-                  hands[0].color if n_active else COL_DIM, -1)
-
-    # — AR tag —
-    ac = (0, 220, 180) if ar else (50, 50, 60)
-    put_text(frame, "AR", (bx, by+28), 0.35, ac)
-
-    # — recording —
-    rx = x + 400
-    if rec.recording:
-        pulse = int(200 + 55 * math.sin(time.time() * 4))
-        cv2.circle(frame, (rx, y+23), 6, (0, 0, pulse), -1, cv2.LINE_AA)
-        s = int(rec.elapsed); mm, ss = s // 60, s % 60
-        put_text(frame, f"REC {mm}:{ss:02d}", (rx+12, y+28), 0.35,
-                 (0, 0, 220))
-
-    # — fps —
-    fx = x + pw - 60
-    fc = (80,200,120) if fps >= 24 else (60,180,255) if fps >= 15 \
-         else (80,80,255)
-    put_text(frame, f"{int(fps)}", (fx, y+30), 0.55, fc, 2)
-    put_text(frame, "FPS", (fx+4, y+50), 0.28, COL_DIM)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -494,7 +449,11 @@ def main():
     print(f"[✓] Webcam: {w}×{h}")
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, w, h)
+    cv2.resizeWindow(WINDOW_NAME, w, h + hud.HEADER_H)
+
+    # one output buffer for header + frame, reused every frame
+    out = np.zeros((h + hud.HEADER_H, w, 3), np.uint8)
+    bar, view = out[:hud.HEADER_H], out[hud.HEADER_H:]
 
     # ── state ──
     canvas   = np.zeros((h, w, 3), np.uint8)
@@ -506,6 +465,13 @@ def main():
     shots_dir = Path(__file__).parent / "screenshots"
     shots_dir.mkdir(exist_ok=True)
 
+    faces    = FaceTracker(model_dir=Path(__file__).parent)
+    store    = capture.CaptureStore(Path(__file__).parent / "captures")
+    ascii_r  = AsciiRenderer()
+    subjects = SubjectManager(ascii_r)
+    print(f"[✓] Face backend: {faces.backend}")
+    print(f"[✓] Captures on file: {store.count}")
+
     rainbow  = False; ar_on = False
     hud_on   = True;  mirror = True
     thick    = 1.0;   hue_t  = 0.0
@@ -515,7 +481,10 @@ def main():
     t0_mono = time.monotonic()
 
     print("[✓] Ready!  S=Screenshot  R=Record  Z/Y=Undo/Redo")
-    print("    A=AR  B=Rainbow  H=HUD  M=Mirror  C=Clear  Q=Quit")
+    print("    A=AR  B=Rainbow  H=HUD  M=Mirror  C=Clear  X=Unlock  Q=Quit")
+    print("    ◎ Circle a face → portrait freezes → type email → ENTER")
+    print("    ☝ Draw  ·  ✌ Color  ·  3 fingers Erase  ·  🖐 Pause")
+    print("    ✊ Hold a fist to clear for the next person.")
 
     while True:
         t0 = time.time()
@@ -524,6 +493,8 @@ def main():
             continue
         if mirror:
             frame = cv2.flip(frame, 1)
+
+        faces.update(frame)
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mpi = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -561,6 +532,7 @@ def main():
             if g == "point":
                 if not hs.was_drawing:
                     history.save(canvas)
+                    hs.stroke = []
                     hs.was_drawing = True
                 col = rainbow_color(hue_t) if rainbow else hs.color
                 if rainbow:
@@ -569,6 +541,38 @@ def main():
                     if math.hypot(sx-hs.prev_pt[0], sy-hs.prev_pt[1]) < 200:
                         neon_line(canvas, hs.prev_pt, (sx, sy), col, thick)
                 hs.prev_pt = (sx, sy)
+                hs.stroke.append((sx, sy))
+
+                # ── lasso: a closed loop locks on to whatever it encircles ──
+                if closed_loop(hs.stroke):
+                    hit = enclosed_faces(hs.stroke, faces.lockable)
+                    if not hit:
+                        # no face recognised — lock the encircled region itself
+                        xs = [p[0] for p in hs.stroke]
+                        ys = [p[1] for p in hs.stroke]
+                        bx, by = max(0, min(xs)), max(0, min(ys))
+                        bw = min(w, max(xs)) - bx
+                        bh = min(h, max(ys)) - by
+                        # inset to the circle's inscribed box — the bounding
+                        # box of a hand-drawn loop is mostly background
+                        ix, iy = bx + bw * 0.14, by + bh * 0.14
+                        iw, ih = bw * 0.72, bh * 0.72
+                        if iw > 60 and ih > 60:
+                            hit = [faces.add_manual((ix, iy, iw, ih), frame)]
+                    if hit:
+                        canvas = history.undo(canvas)   # loop was a gesture
+                        for tr in hit[:2]:
+                            act = subjects.toggle(tr, col)
+                            kind = getattr(tr, "kind", "face")
+                            if act == "released" and kind == "manual":
+                                faces.drop_manual(tr.id)
+                            print(f"[◎] Subject {act} ({kind})")
+                        cx, cy = hit[0].center
+                        parts.spawn(int(cx), int(cy), col, count=40)
+                        hs.prev_pt = None
+                        hs.was_drawing = False
+                    hs.stroke = []
+
                 # cursor
                 cr = max(4, int(8 * thick))
                 cv2.circle(frame, (sx, sy), cr, col, -1, cv2.LINE_AA)
@@ -577,11 +581,12 @@ def main():
                 parts.spawn(sx, sy, col, count=2)
             else:
                 hs.prev_pt = None
+                hs.stroke = []
                 if hs.was_drawing:
                     hs.was_drawing = False
 
-            # ── erase ──
-            if g == "palm":
+            # ── erase: exactly three raised fingers ──
+            if g == "three":
                 ex = int(lm[MIDDLE_MCP].x * w)
                 ey = int(lm[MIDDLE_MCP].y * h)
                 er = 60
@@ -589,11 +594,29 @@ def main():
                 cv2.circle(frame, (ex, ey), er, (255,255,255), 2, cv2.LINE_AA)
                 cv2.circle(frame, (ex, ey), er-4, (80,80,80), 1, cv2.LINE_AA)
 
-            # ── clear ──
-            if g == "fist" and now - clear_cd > 1.5:
-                history.save(canvas)
-                canvas = np.zeros((h, w, 3), np.uint8)
-                clear_cd = now
+            # ── clear (held, not tapped) ──
+            # Clearing is the one destructive gesture, so it needs intent:
+            # a fist must be held, and the ring shows how far along it is.
+            if g == "fist":
+                if hs.fist_since is None:
+                    hs.fist_since = now
+                held = now - hs.fist_since
+                cx, cy = int(lm[MIDDLE_MCP].x * w), int(lm[MIDDLE_MCP].y * h)
+                frac = min(1.0, held / FIST_HOLD)
+                cv2.circle(frame, (cx, cy), 46, (60, 60, 75), 2, cv2.LINE_AA)
+                if frac > 0:
+                    cv2.ellipse(frame, (cx, cy), (46, 46), -90, 0,
+                                int(360 * frac), (80, 80, 255), 3, cv2.LINE_AA)
+                if held >= FIST_HOLD and now - clear_cd > 1.5:
+                    history.save(canvas)
+                    canvas = np.zeros((h, w, 3), np.uint8)
+                    subjects.release_all(); faces.manual.clear()
+                    clear_cd = now
+                    hs.fist_since = None
+                    parts.spawn(cx, cy, (80, 80, 255), count=30)
+                    print("[✋] Cleared (fist held)")
+            else:
+                hs.fist_since = None
 
             # ── color cycle ──
             if g == "peace":
@@ -603,23 +626,47 @@ def main():
         for hi in range(n_hands, 2):
             hs = hands[hi]
             hs.ge.gesture = "none"; hs.sm.reset(); hs.prev_pt = None
+            hs.stroke = []; hs.fist_since = None
             if hs.was_drawing:
                 hs.was_drawing = False
 
         # ── particles ──
         parts.tick(dt)
 
-        # ── composite ──
-        out = cv2.add(frame, canvas)
-        parts.draw(out)
+        # ── composite into the frame half of the output buffer ──
+        cv2.add(frame, canvas, view)
+        parts.draw(view)
+
+        # ── locked subjects: reticles + live ASCII cards ──
+        subjects.update(frame, faces, dt)
+        for sb in subjects.subjects:
+            if sb.field is None:
+                sb.field = capture.EmailField()
+        if hud_on:
+            draw_candidates(view, faces.visible,
+                            {s.tid for s in subjects.subjects})
+        subjects.draw(view, faces)
+
+        if subjects.subjects:
+            lead = subjects.subjects[0]
+            if lead.idx is None:
+                guide_stage = "countdown"
+            elif lead.field is not None and lead.field.status == "saved":
+                guide_stage = "saved"
+            else:
+                guide_stage = "email"
+        else:
+            guide_stage = "draw"
+        if hud_on:
+            hud.guide(view, hands, n_hands, faces.raw_count, guide_stage)
 
         # ── fps ──
         ftimes.append(time.time() - t0)
         fps = len(ftimes) / sum(ftimes) if len(ftimes) > 1 else 30.0
 
-        if hud_on:
-            draw_hud(out, w, h, hands, n_hands, rainbow, ar_on, rec,
-                     thick, fps)
+        hud.draw(bar, hands, n_hands, PALETTE, rainbow,
+                 rainbow_color(hue_t), ar_on, rec, thick, fps,
+                 subjects.active, faces.raw_count)
 
         if rec.recording:
             rec.feed(out)
@@ -628,6 +675,23 @@ def main():
 
         # ── keyboard ──
         key = cv2.waitKey(1) & 0xFF
+
+        # While an email field has focus every printable key belongs to it,
+        # so the single-letter shortcuts below must not see them.  ESC drops
+        # focus first, and only then quits.
+        sub_ = subjects.subjects[0] if subjects.subjects else None
+        fld = sub_.field if sub_ is not None else None
+        if fld is not None and fld.active and key != 255:
+            act = fld.key(key)
+            if act == "submit":
+                if capture.valid_email(fld.text):
+                    r_ = store.save(fld.text, sub_.idx, ascii_r, sub_.photo)
+                    fld.saved(f"SAVED  ·  {store.count} ON FILE")
+                    print(f"[✉️] {r_['email']} → {r_['image']}")
+                else:
+                    fld.error("THAT DOESN'T LOOK LIKE AN EMAIL")
+            continue
+
         if key in (ord("q"), ord("Q"), 27):
             break
         elif key in (ord("c"), ord("C")):
@@ -647,8 +711,11 @@ def main():
                 print(f"[🎬] MP4 → {mp4}")
                 if gif: print(f"[🎞️] GIF → {gif}")
             else:
-                rec.start(w, h, fps=24)
+                rec.start(w, h + hud.HEADER_H, fps=24)
                 print("[⏺️]  Recording…")
+        elif key in (ord("x"), ord("X")):
+            faces.manual.clear()
+            print(f"[◎] Cleared {subjects.release_all()} capture(s)")
         elif key in (ord("b"), ord("B")):
             rainbow = not rainbow
             print(f"[🌈] Rainbow {'ON' if rainbow else 'OFF'}")
