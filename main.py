@@ -39,6 +39,7 @@ from datetime import datetime
 
 import hud
 import capture
+import mailer
 from face_ascii import (
     FaceTracker, AsciiRenderer, SubjectManager,
     closed_loop, enclosed_faces, draw_candidates,
@@ -467,10 +468,19 @@ def main():
 
     faces    = FaceTracker(model_dir=Path(__file__).parent)
     store    = capture.CaptureStore(Path(__file__).parent / "captures")
+    mail_cfg = mailer.load_config()
+    sender   = mailer.EmailSender(mail_cfg)
     ascii_r  = AsciiRenderer()
     subjects = SubjectManager(ascii_r)
     print(f"[✓] Face backend: {faces.backend}")
     print(f"[✓] Captures on file: {store.count}")
+    if sender.enabled:
+        print(f"[✓] Emailing as: {mail_cfg['user']}")
+    else:
+        print("[·] Emailing off — collecting addresses only (see .env.example)")
+    _owed = len(store.pending())
+    if _owed:
+        print(f"[·] {_owed} unsent from a previous run — run send_pending.py")
 
     rainbow  = False; ar_on = False
     hud_on   = True;  mirror = True
@@ -637,6 +647,22 @@ def main():
         cv2.add(frame, canvas, view)
         parts.draw(view)
 
+        # ── send outcomes: the worker posts, the main thread writes ──
+        for rec_id, st_, err, tries in sender.results():
+            rec_ = store.mark(rec_id, st_, err)
+            who = rec_["email"] if rec_ else rec_id
+            if st_ == "sent":
+                print(f"[✓] Emailed {who}")
+            else:
+                print(f"[!] Email to {who} failed after {tries}: {err}")
+            for sb_ in subjects.subjects:
+                if sb_.field is not None and sb_.sent_id == rec_id:
+                    if st_ == "sent":
+                        sb_.field.sent("SENT  ·  CHECK YOUR INBOX")
+                    else:
+                        # On disk either way; send_pending.py drains it later.
+                        sb_.field.failed("SAVED  ·  WE'LL EMAIL IT LATER")
+
         # ── locked subjects: reticles + live ASCII cards ──
         subjects.update(frame, faces, dt)
         for sb in subjects.subjects:
@@ -702,8 +728,20 @@ def main():
                         print(f"[!] Could not save capture: {e}")
                         fld.error("COULDN'T SAVE  ·  PRESS ENTER TO RETRY")
                     else:
-                        fld.saved(f"SAVED  ·  {store.count} ON FILE")
                         print(f"[✉️] {r_['email']} → {r_['image']}")
+                        # Hand the worker copies and absolute paths only —
+                        # never the live record or the store.
+                        sub_.sent_id = r_["id"]
+                        queued = sender.submit(
+                            r_["id"], r_["email"],
+                            store.dir / r_["image"],
+                            ascii_r.to_text(sub_.idx),
+                            r_.get("captured_at", ""))
+                        if queued:
+                            fld.sending("SENDING TO YOUR INBOX…")
+                            fld.active = False
+                        else:
+                            fld.saved(f"SAVED  ·  {store.count} ON FILE")
             continue
 
         if key in (ord("q"), ord("Q"), 27):
@@ -746,6 +784,9 @@ def main():
     if rec.recording:
         mp4, gif = rec.stop()
         if mp4: print(f"[🎬] MP4 → {mp4}")
+    # Give an in-flight send a moment to land; the worker is a daemon, so a
+    # hung socket can never stop the app from exiting.
+    sender.stop(drain=1.5)
     cap.release(); cv2.destroyAllWindows(); det.close()
     print("[✦] Air Writer closed.")
 

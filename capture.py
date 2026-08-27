@@ -166,7 +166,8 @@ class EmailField:
     def __init__(self):
         self.text = ""
         self.active = True
-        self.status = ""          # "", "saved", "error"
+        # "", saved, error, sending, sent, failed
+        self.status = ""
         self.message = ""
         self._flash = 0.0
 
@@ -196,6 +197,20 @@ class EmailField:
         self.message = msg
         self.active = False
         self._flash = time.time()
+
+    def sending(self, msg):
+        """Queued or in flight.  Focus is already gone; this is just news."""
+        self.status = "sending"
+        self.message = msg
+
+    def sent(self, msg):
+        self.status = "sent"
+        self.message = msg
+
+    def failed(self, msg):
+        """A send that will not be retried — the address is still on disk."""
+        self.status = "failed"
+        self.message = msg
 
     def error(self, msg):
         self.status = "error"

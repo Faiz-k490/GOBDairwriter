@@ -512,6 +512,7 @@ class _Subject:
         self.ascii_img = None    # composed for screen
         self.photo = None        # the source crop, saved alongside
         self.field = None        # capture.EmailField, attached by main
+        self.sent_id = None      # capture-record id, once submitted
         self.flash = 0.0         # shutter flash after the countdown
 
 
@@ -749,11 +750,21 @@ def _card(out, s, x, y, now, e, lost):
     # header
     text(out, f"ASCII PORTRAIT {s.slot:02d}", (x0 + CARD_PAD, y0 + 7), 12, accent,
          tracking=1, strength=e)
-    status = "CAPTURED"
+    # The chip tracks the send, so the person can see their portrait is
+    # actually on its way rather than just filed.
+    fs = s.field.status if s.field is not None else ""
+    status, dot = {
+        "sending": ("SENDING", (250, 200, 120)),
+        "sent": ("SENT", (150, 220, 180)),
+        "failed": ("QUEUED", (250, 200, 120)),
+        "saved": ("SAVED", (150, 220, 180)),
+    }.get(fs, ("CAPTURED", (150, 220, 180)))
+    if fs == "sending" and int(now * 2) % 2:
+        dot = (90, 84, 110)                       # slow pulse while in flight
     sw = text_width(status, 10, tracking=1)
     text(out, status, (x1 - CARD_PAD - sw - 12, y0 + 9), 10,
-         (150, 220, 180), tracking=1, strength=e)
-    cv2.circle(out, (x1 - CARD_PAD - 4, y0 + 15), 3, (150, 220, 180), -1,
+         dot if fs != "sending" else (250, 200, 120), tracking=1, strength=e)
+    cv2.circle(out, (x1 - CARD_PAD - 4, y0 + 15), 3, dot, -1,
                cv2.LINE_AA)
     cv2.line(out, (vx0 + 1, y0 + CARD_HEAD), (vx1 - 1, y0 + CARD_HEAD),
              (48, 46, 62), 1, cv2.LINE_AA)
@@ -781,9 +792,11 @@ def _field(out, s, x0, y, now, e, accent):
     f = s.field
     fx, fw = x0 + CARD_PAD, CARD_W - CARD_PAD * 2
 
-    if f.status == "saved":
+    if f.status in ("saved", "sent"):
         col = (150, 220, 180)
-    elif f.status == "error":
+    elif f.status == "sending":
+        col = (120, 200, 250)
+    elif f.status in ("error", "failed"):
         col = (90, 90, 245)
     elif f.active:
         col = accent
@@ -814,9 +827,11 @@ def _field(out, s, x0, y, now, e, accent):
                  2, cv2.LINE_AA)
 
     # ── status line ──
-    if f.status == "saved":
+    if f.status in ("saved", "sent"):
         msg, mc = f.message, (150, 220, 180)
-    elif f.status == "error":
+    elif f.status == "sending":
+        msg, mc = f.message, (150, 210, 250)
+    elif f.status in ("error", "failed"):
         msg, mc = f.message, (120, 120, 235)
     elif f.active:
         msg, mc = "TYPE EMAIL  ·  ENTER TO SAVE", (150, 146, 172)
