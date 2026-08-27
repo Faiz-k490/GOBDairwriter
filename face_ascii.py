@@ -86,6 +86,25 @@ STYLES = [
 ]
 STYLE_COLOR = 4          # the one that samples the subject's real colours
 
+# ── live ASCII mirror ──────────────────────────────────────────────────
+#
+# Grid MUST divide the frame exactly.  INTER_AREA falls off its fast path
+# otherwise: measured on this machine, 256x72 resizes in 0.14ms and 213x60 in
+# 3.18ms — 22x worse for a slightly different shape.  Same class of trap as
+# _ManualTrack.SCALE; do not "improve" these without re-benchmarking.
+LIVE_COLS, LIVE_ROWS = 256, 72        # 1280/5, 720/10
+LIVE_CW, LIVE_CH = 5, 10
+
+# Live mode is GLOW — bright pixels get the dense glyph — which is the
+# opposite of the portrait's ink-on-paper.  Keeping ink polarity on a whole
+# room floods the dark background with heavy glyphs and renders the lit face
+# as a hole; glow leaves most of the frame black so the person pops and the
+# neon ink stays readable on top.
+LIVE_TINT = (235, 255, 210)           # BGR — cool white-green
+LIVE_FLOOR = 0.16                     # below this stays blank
+LIVE_GAMMA = 1.10
+LIVE_EXPO_F = 0.10                    # EMA on exposure, else the tone pumps
+
 MAX_SUBJECTS = 1
 
 LOST_GRACE   = 1.6          # seconds a subject survives without detection
@@ -360,6 +379,92 @@ class AsciiRenderer:
         # 14x28 export bake is cached too and a save does not re-render glyphs.
         self._styles = {}
         self._levels = levels
+
+        # ── live mirror: everything preallocated, nothing per-frame ──
+        live_ramp = self._build_ramp(levels)
+        a = np.clip(self._bake(live_ramp, (LIVE_CW, LIVE_CH)) * 1.35, 0, 1)
+        # Pre-blended to uint8 BGR so the hot loop is an integer gather with
+        # no float maths: the float lerp compose() uses costs ~18ms at this
+        # size, the gather ~1.3ms, for bit-identical output.
+        self._live_atlas = np.clip(
+            a[..., None] * np.array(LIVE_TINT, np.float32), 0, 255
+        ).astype(np.uint8)
+        self._live_alpha = (a * 255).astype(np.uint8)
+        self._live_gray = np.empty((720, 1280), np.uint8)
+        self._live_small = np.empty((LIVE_ROWS, LIVE_COLS), np.uint8)
+        self._elo, self._ehi = None, None
+        self._lut_lo, self._lut_hi = -99.0, -99.0
+        self._live_lut = np.zeros(256, np.uint8)
+
+    # ── live mirror ──
+
+    def _rebuild_live_lut(self):
+        self._lut_lo, self._lut_hi = self._elo, self._ehi
+        x = np.arange(256, dtype=np.float32)
+        norm = np.clip((x - self._elo) / max(1.0, self._ehi - self._elo), 0, 1)
+        lit = np.clip((norm - LIVE_FLOOR) / (1.0 - LIVE_FLOOR), 0,
+                      1) ** LIVE_GAMMA
+        n = len(self.ramp) - 1
+        self._live_lut = np.clip((lit * n).round(), 0, n).astype(np.uint8)
+
+    def live_indices(self, frame_bgr, cols=LIVE_COLS, rows=LIVE_ROWS):
+        """Fast whole-frame quantise for the mirror.  Glow, not ink.
+
+        Everything the portrait path does for tone — bilateral, CLAHE,
+        unsharp, Sobel, vignette — is dropped here.  They are portrait devices
+        that either cost more than they return at one pixel per cell, or
+        actively misbehave on a whole room: CLAHE turns wall texture into
+        glyph churn, and the strongest edges in a hall are door frames.
+        """
+        if self._live_gray.shape != frame_bgr.shape[:2]:
+            self._live_gray = np.empty(frame_bgr.shape[:2], np.uint8)
+        if self._live_small.shape != (rows, cols):
+            self._live_small = np.empty((rows, cols), np.uint8)
+        cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY, dst=self._live_gray)
+        # INTER_AREA box-average is both the downsample and the denoise.
+        cv2.resize(self._live_gray, (cols, rows), dst=self._live_small,
+                   interpolation=cv2.INTER_AREA)
+
+        # Exact percentiles from a 256-bin histogram: measured identical to
+        # np.percentile(3, 97) and ~11x faster.
+        h = cv2.calcHist([self._live_small], [0], None, [256], [0, 256]).ravel()
+        c = np.cumsum(h)
+        tot = c[-1]
+        lo = float(np.searchsorted(c, tot * 0.03))
+        hi = float(np.searchsorted(c, tot * 0.97))
+        if self._elo is None:
+            self._elo, self._ehi = lo, hi
+        else:
+            self._elo += LIVE_EXPO_F * (lo - self._elo)
+            self._ehi += LIVE_EXPO_F * (hi - self._ehi)
+        if (abs(self._elo - self._lut_lo) > 1.5 or
+                abs(self._ehi - self._lut_hi) > 1.5):
+            self._rebuild_live_lut()
+        return cv2.LUT(self._live_small, self._live_lut)
+
+    def live_color(self, idx, frame_bgr, dst):
+        """Live glyphs tinted by each cell's own mean colour, into dst."""
+        rows, cols = idx.shape
+        h, w = dst.shape[:2]
+        if getattr(self, "_alpha_buf", None) is None or \
+                self._alpha_buf.shape != (h, w):
+            self._alpha_buf = np.empty((h, w), np.uint8)
+            self._alpha_view = (self._alpha_buf
+                                .reshape(rows, LIVE_CH, cols, LIVE_CW)
+                                .transpose(0, 2, 1, 3))
+            self._alpha_bgr = np.empty((h, w, 3), np.uint8)
+            self._cell_bgr = np.empty((rows, cols, 3), np.uint8)
+            self._cell_big = np.empty((h, w, 3), np.uint8)
+        self._alpha_view[...] = self._live_alpha[idx]
+        cv2.resize(frame_bgr, (cols, rows), dst=self._cell_bgr,
+                   interpolation=cv2.INTER_AREA)
+        cv2.resize(self._cell_bgr, (w, h), dst=self._cell_big,
+                   interpolation=cv2.INTER_NEAREST)
+        cv2.cvtColor(self._alpha_buf, cv2.COLOR_GRAY2BGR, dst=self._alpha_bgr)
+        # Integer path with dst=: the numpy equivalent would allocate two
+        # 2.7MB float arrays every frame.
+        cv2.multiply(self._cell_big, self._alpha_bgr, dst=dst,
+                     scale=1.0 / 255.0)
 
     # ── styles ──
 

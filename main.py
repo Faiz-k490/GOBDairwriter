@@ -23,6 +23,7 @@ Keyboard:
   A   Toggle AR mode   B   Toggle rainbow mode
   H   Toggle HUD       M   Toggle mirror
   F   Portrait style   (CLASSIC / BLOCKS / MATRIX / HALFTONE / COLOR)
+  L   Live ASCII mirror   K   ... in real colours
   C   Clear canvas     Q / ESC   Quit
 """
 
@@ -41,6 +42,7 @@ from datetime import datetime
 import hud
 import capture
 import mailer
+import face_ascii
 from face_ascii import (
     FaceTracker, AsciiRenderer, SubjectManager,
     closed_loop, enclosed_faces, draw_candidates,
@@ -483,6 +485,10 @@ def main():
     if _owed:
         print(f"[·] {_owed} unsent from a previous run — run send_pending.py")
 
+    live_mode = False        # whole-frame ASCII mirror (L)
+    live_col  = False        # ... in the subject's own colours (K)
+    live_view = None         # strided view of `view`, built on first use
+    live_demoted = 0.0       # last time live mode was scaled back
     rainbow  = False; ar_on = False
     hud_on   = True;  mirror = True
     thick    = 1.0;   hue_t  = 0.0
@@ -492,7 +498,8 @@ def main():
     t0_mono = time.monotonic()
 
     print("[✓] Ready!  S=Screenshot  R=Record  Z/Y=Undo/Redo")
-    print("    A=AR  B=Rainbow  F=Style  H=HUD  M=Mirror  C=Clear  X=Unlock  Q=Quit")
+    print("    A=AR  B=Rainbow  F=Style  L=LiveASCII  H=HUD  M=Mirror")
+    print("    C=Clear  X=Unlock  Q=Quit")
     print("    ◎ Circle a face → portrait freezes → type email → ENTER")
     print("    ☝ Draw  ·  ✌ Color  ·  3 fingers Erase  ·  🖐 Pause")
     print("    ✊ Hold a fist to clear for the next person.")
@@ -645,7 +652,24 @@ def main():
         parts.tick(dt)
 
         # ── composite into the frame half of the output buffer ──
-        cv2.add(frame, canvas, view)
+        if live_mode:
+            # ASCII replaces the camera image; ink still adds on top.  frame
+            # itself is never written to — the capture crop comes from it.
+            l_idx = ascii_r.live_indices(frame)
+            if live_col:
+                ascii_r.live_color(l_idx, frame, view)
+            else:
+                if live_view is None:
+                    # view is C-contiguous, so glyphs can be scattered
+                    # straight into the output buffer with no intermediate.
+                    live_view = view.reshape(
+                        face_ascii.LIVE_ROWS, face_ascii.LIVE_CH,
+                        face_ascii.LIVE_COLS, face_ascii.LIVE_CW, 3
+                    ).transpose(0, 2, 1, 3, 4)
+                live_view[...] = ascii_r._live_atlas[l_idx]
+            cv2.add(view, canvas, view)
+        else:
+            cv2.add(frame, canvas, view)
         parts.draw(view)
 
         # ── send outcomes: the worker posts, the main thread writes ──
@@ -686,6 +710,19 @@ def main():
             guide_stage = "draw"
         if hud_on:
             hud.guide(view, hands, n_hands, faces.raw_count, guide_stage)
+
+        # ── live mode must never be the reason the demo stutters ──
+        if live_mode and len(ftimes) >= 30:
+            med = sorted(ftimes)[len(ftimes) // 2]
+            if med > 0.040 and now - live_demoted > 2.0:
+                live_demoted = now
+                if live_col:
+                    live_col = False          # colour first, it costs most
+                    print("[▦] Live colour off — keeping the frame rate up")
+                else:
+                    live_mode = False
+                    print("[▦] Live ASCII off — frame rate too low")
+                ftimes.clear()                # don't re-fire on stale samples
 
         # ── fps ──
         ftimes.append(time.time() - t0)
@@ -777,6 +814,12 @@ def main():
             ar_on = not ar_on
             if not ar_on: ar_stab.reset()
             print(f"[📌] AR {'ON' if ar_on else 'OFF'}")
+        elif key in (ord("l"), ord("L")):
+            live_mode = not live_mode
+            print(f"[▦] Live ASCII {'ON' if live_mode else 'OFF'}")
+        elif key in (ord("k"), ord("K")):
+            live_col = not live_col
+            print(f"[▦] Live colour {'ON' if live_col else 'OFF'}")
         elif key in (ord("f"), ord("F")):
             subjects.style = (subjects.style + 1) % len(face_styles)
             subjects.restyle(subjects.style)
