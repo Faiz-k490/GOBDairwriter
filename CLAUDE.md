@@ -23,10 +23,19 @@ never dead-end in front of a crowd?* Reliability beats features.
 ## Run it
 
 ```bash
-python3 main.py
+./setup.sh                  # venv + pinned deps + both model files
+.venv/bin/python main.py
 ```
 
 Needs macOS camera permission for whatever terminal launches it.
+
+**Both model files are gitignored**, so a fresh clone has neither and `main.py`
+returns immediately without `hand_landmarker.task`. `setup.sh` fetches them; it
+is safe to re-run. Python must be **3.13** — mediapipe 0.10.33 ships no 3.14
+wheels and 3.14 is the brew default.
+
+Run `.venv/bin/python test_fair.py` before a demo. It is offline and mails
+nobody.
 
 ## Demo flow (the state machine that matters)
 
@@ -38,17 +47,22 @@ Needs macOS camera permission for whatever terminal launches it.
    `_Subject.idx` stays `None` throughout; nothing is captured yet.
 4. **Capture** — portrait **freezes** (it is a keepsake, not a live filter),
    white shutter flash, card slides in from the right.
-5. **Email** — type, `ENTER`. Writes to `captures/`.
+5. **Email** — type, `ENTER`. Writes to `captures/` **and queues the send**.
+   The card tracks it: `SENDING` → `SENT`, or `QUEUED` if the network was
+   bad (the address is on disk either way; `send_pending.py` drains it).
 6. **Clear** — hold a fist 0.7s. Next person.
 
 ## Module map
 
 | file | ~LOC | what |
 |---|---|---|
-| `main.py` | 720 | camera loop, gestures, canvas/ink, lasso, key routing |
-| `face_ascii.py` | 838 | face tracking, ASCII renderer, subject cards |
-| `capture.py` | 147 | `CaptureStore` (JSON+PNG on disk), `EmailField` |
-| `hud.py` | 127 | the 62px header strip |
+| `mailer.py` | 200 | `.env` config, `EmailSender` (daemon thread + retry queue), MIME build |
+| `send_pending.py` | 100 | offline drain script for anything left unsent |
+| `test_fair.py` | 300 | 44 offline checks — run before the fair |
+| `main.py` | 800 | camera loop, gestures, canvas/ink, lasso, key routing |
+| `face_ascii.py` | 1000 | face tracking, ASCII renderer, subject cards |
+| `capture.py` | 210 | `CaptureStore` (JSON+PNG on disk), `EmailField` |
+| `hud.py` | 240 | the 62px header strip |
 | `ui.py` | 123 | real-font text, alpha blit, rounded pills |
 
 Output is `(720 + hud.HEADER_H) x 1280` — the header is composited *above*
@@ -107,7 +121,18 @@ slices), not drawn onto it.
 8. **Never refresh a tracking template every frame.** It re-anchors to
    wherever the box already is and freezes on background. Refresh on a timer
    (`REFRESH = 2.0`) only.
-9. **`ls -la` hangs in this shell.** Use `printf '%s\n' *` instead.
+9. **The live-ASCII grid must divide the frame exactly.** `INTER_AREA` falls
+   off a fast path otherwise — 256x72 resizes in 0.14ms, 213x60 in 3.18ms.
+   Same class of trap as #7.
+10. **Live mode is GLOW (bright = dense); the portrait is INK (dark = dense).**
+   Two different LUTs, deliberately. Ink polarity across a whole room floods
+   the dark background with heavy glyphs and renders the lit face as a hole.
+11. **`np.take(..., out=view)` is slower than plain fancy-indexing** into a
+   strided view (2.78ms vs 1.58ms) — numpy leaves its fast path. Don't
+   "optimise" the live compose that way; it was measured.
+12. **The mailer thread must never touch `store`, records, or render state.**
+   Jobs in as copies, outcomes out on a second queue, main thread writes.
+13. **`ls -la` hangs in this shell.** Use `printf '%s\n' *` instead.
 
 ## Testing — read this before you try to "just run it"
 
@@ -146,6 +171,23 @@ first** — press `S` in the app, which writes to `screenshots/` where you can
 read it. The user has been asked for this twice and it hasn't happened yet;
 ask again rather than tuning blind.
 
+## Emailing
+
+`mailer.py` reads `.env` (gitignored — it holds a password). `.env.example`
+documents how to get a Gmail app password: 2FA on, then
+<https://myaccount.google.com/apppasswords>.
+
+Sending is a **daemon thread over a queue** — the render loop must never block
+on a socket. Failures retry with backoff over ~6.5 minutes; permanent ones
+(bad password, refused recipient) give up immediately rather than burning the
+daily quota. Anything still `pending` is drained afterwards by
+`send_pending.py --dry-run` / `send_pending.py`.
+
+`AIRWRITER_ENABLED=0` collects addresses without sending — use it to demo the
+flow, and it is what keeps the test suite offline.
+
+A consumer Gmail account caps near **500 recipients/day**.
+
 ## Storage
 
 ```
@@ -157,8 +199,10 @@ captures/
 ```
 
 `captures/` is **gitignored — it holds real people's email addresses.**
-Never commit it. Records carry `"emailed": false` for a future send script
-(not written yet).
+Never commit it. Records carry `id` (uuid), `status` (`pending`/`sent`/`failed`),
+`attempts` and `last_error`; `emailed` is kept as a bool mirror of
+`status == "sent"` so the original shape still reads. Indexes written
+before send-tracking are upgraded on load.
 
 ## Dependencies & models
 
@@ -197,6 +241,13 @@ every 2nd. `indices()` is ~2.4ms but runs **once per capture**, not per frame.
   template-matches whatever was circled. A loose lasso that's mostly
   background will track the background. It auto-promotes to a real face lock
   once the detector finds a face nearby, so it's a bridge, not a solution.
-- No email is actually *sent* — addresses and images are only collected.
+- **Email now sends** via Gmail SMTP (`mailer.py`), needs `.env` — see
+  `.env.example`. Deliverability from a consumer Gmail account is the weak
+  point: a burst of near-identical mail with attachments is spam-shaped, and
+  some will land in Promotions. A club domain + a transactional service would
+  be materially better if it ever matters.
+- **Live ASCII, the 4 new styles, and attract mode are all unvalidated against
+  a real face too** — same blind spot as the portrait, now larger. `LIVE_FLOOR`
+  / `LIVE_GAMMA` are the knobs; get a real `S` frame before touching them.
 - `MAX_SUBJECTS = 1` deliberately: two keyboard-focusable email fields with
   one keyboard is a worse demo, not a richer one.
