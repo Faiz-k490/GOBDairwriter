@@ -118,10 +118,14 @@ def build_message(cfg, to_addr, png_path=None, ascii_text="", when=""):
 
     if png_path and Path(png_path).exists():
         data = Path(png_path).read_bytes()
-        # Attach to the HTML part so the cid: reference resolves.
-        msg.get_payload()[1].add_related(data, "image", "png", cid=f"<{cid}>")
-        msg.add_attachment(data, maintype="image", subtype="png",
-                           filename=Path(png_path).name)
+        # One copy, not two.  Attaching it separately as well would base64 a
+        # ~1MB portrait twice into every message for no visible gain.  Giving
+        # the inline part a filename and inline disposition means clients that
+        # render it show it in place, and the rest offer it as a download.
+        msg.get_payload()[1].add_related(
+            data, "image", "png", cid=f"<{cid}>",
+            filename=Path(png_path).name,
+            disposition="inline")
     return msg
 
 
