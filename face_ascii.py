@@ -66,6 +66,26 @@ CARD_GAP     = 14
 
 # One at a time: the card carries a keyboard-focused email field, and two
 # focusable fields with one keyboard is a worse demo, not a richer one.
+# ── portrait styles ────────────────────────────────────────────────────
+#
+# Every pool goes through _build_ramp(), which measures real ink coverage at
+# the live font and cell size and picks evenly-spaced glyphs.  Hand-picking a
+# ramp is what produces banding: " .:-=+*#%@" is not monotonic ('-' carries
+# less ink than ':', '+' less than '=').  Add pools, never hand-ordered ramps.
+#
+# ink/paper are passed straight to compose(), which already takes both, so a
+# style that only recolours costs nothing but a dict lookup.
+
+STYLES = [
+    # name        ink              paper            pool
+    ("CLASSIC",  (34, 32, 30),   (236, 236, 232), " .,:;-~=+*ox%#@"),
+    ("BLOCKS",   (28, 26, 24),   (240, 240, 236), " .:-=+*#%@█▓▒░"),
+    ("MATRIX",   (120, 255, 140), (8, 14, 8),     " .:-=+*01#%@$&"),
+    ("HALFTONE", (30, 28, 34),   (242, 240, 238), " .,·:;∘o*O0@#%"),
+    ("COLOR",    (34, 32, 30),   (236, 236, 232), " .,:;-~=+*ox%#@"),
+]
+STYLE_COLOR = 4          # the one that samples the subject's real colours
+
 MAX_SUBJECTS = 1
 
 LOST_GRACE   = 1.6          # seconds a subject survives without detection
@@ -336,6 +356,75 @@ class AsciiRenderer:
         self.atlas = self._bake(self.ramp)
         self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
         self._vig = self._vignette(ASCII_COLS, ASCII_ROWS)
+        # One ramp+atlas per style, built once.  Keyed by (style, cell) so the
+        # 14x28 export bake is cached too and a save does not re-render glyphs.
+        self._styles = {}
+        self._levels = levels
+
+    # ── styles ──
+
+    def style(self, i, cell=None):
+        """(ramp, atlas) for style i at a cell size.  Built once, then cached."""
+        i = i % len(STYLES)
+        key = (i, cell)
+        got = self._styles.get(key)
+        if got is None:
+            pool = STYLES[i][3]
+            if cell is None and i == 0:
+                # Style 0 is what __init__ already built; do not rebuild it.
+                got = (self.ramp, self.atlas)
+            else:
+                ramp = self._build_ramp(self._levels, pool)
+                got = (ramp, self._bake(ramp, cell))
+            self._styles[key] = got
+        return got
+
+    def compose_style(self, idx, i, cell=None):
+        """Render a frozen grid in style i."""
+        ink, paper = STYLES[i % len(STYLES)][1], STYLES[i % len(STYLES)][2]
+        ramp, atlas = self.style(i, cell)
+        return self._compose_atlas(idx, atlas, ink, paper)
+
+    def compose_color(self, idx, src, i=STYLE_COLOR, cell=None):
+        """Style i, but every glyph tinted by the mean colour of its cell.
+
+        cv2.resize with INTER_AREA *is* the per-cell mean: box-averaging over
+        each source block is exactly that average, so there is no separate
+        sampling pass.
+        """
+        rows, cols = idx.shape
+        ramp, atlas = self.style(i, cell)
+        n, ch, cw = atlas.shape
+        alpha = np.clip(atlas[idx].transpose(0, 2, 1, 3)
+                        .reshape(rows * ch, cols * cw) * 1.35, 0, 1)[..., None]
+
+        cell_bgr = cv2.resize(src, (cols, rows), interpolation=cv2.INTER_AREA)
+        # Saturate on the grid, not the full image: every pixel in a cell
+        # shares one colour, so the result is identical and ~30x cheaper.
+        hsv = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2HSV)
+        hsv[..., 1] = np.clip(hsv[..., 1].astype(np.int16) * 3 // 2,
+                              0, 255).astype(np.uint8)
+        cell_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        big = cv2.resize(cell_bgr, (cols * cw, rows * ch),
+                         interpolation=cv2.INTER_NEAREST).astype(np.float32)
+
+        paper = np.array(STYLES[i % len(STYLES)][2], np.float32)
+        # Darken the sampled colour so a pale face still reads as ink.
+        return (paper * (1 - alpha) + big * 0.82 * alpha).astype(np.uint8)
+
+    def export(self, idx, style=0, src=None, cell=None):
+        """The emailed render: style i at export cell size."""
+        if style % len(STYLES) == STYLE_COLOR and src is not None:
+            return self.compose_color(idx, src, style, cell)
+        return self.compose_style(idx, style, cell)
+
+    def _compose_atlas(self, idx, atlas, ink, paper):
+        rows, cols = idx.shape
+        ch, cw = atlas.shape[1], atlas.shape[2]
+        alpha = atlas[idx].transpose(0, 2, 1, 3).reshape(rows * ch, cols * cw)
+        alpha = np.clip(alpha * 1.35, 0, 1)[..., None]
+        return (np.array(paper, np.float32) * (1 - alpha) +
+                np.array(ink, np.float32) * alpha).astype(np.uint8)
 
     # ── ramp construction ──
 
@@ -345,13 +434,13 @@ class AsciiRenderer:
                                  fill=255)
         return float(np.asarray(img, np.float32).mean() / 255.0)
 
-    def _build_ramp(self, n):
+    def _build_ramp(self, n, pool=None):
         """Pick n glyphs whose ink coverage is as evenly spaced as possible.
 
         Guarantees a monotonic brightness ramp for whatever font and cell
         size we actually render at, which a hand-written ramp does not.
         """
-        cov = {c: self._coverage(c) for c in self.POOL}
+        cov = {c: self._coverage(c) for c in (pool or self.POOL)}
         top = max(cov.values())
         out = []
         for i in range(n):
@@ -513,14 +602,30 @@ class _Subject:
         self.photo = None        # the source crop, saved alongside
         self.field = None        # capture.EmailField, attached by main
         self.sent_id = None      # capture-record id, once submitted
+        self.style = 0           # index into STYLES
         self.flash = 0.0         # shutter flash after the countdown
 
 
 class SubjectManager:
+    def restyle(self, i):
+        """Switch every captured portrait to style i.
+
+        Re-composing from the frozen grid is sub-millisecond, so nobody has to
+        circle their face again to try a different look.  The colour style
+        needs the source crop, which _Subject keeps in .photo.
+        """
+        for s in self.subjects:
+            s.style = i % len(STYLES)
+            if s.idx is not None:
+                s.ascii_img = (self.r.compose_color(s.idx, s.photo, s.style)
+                               if s.style == STYLE_COLOR and s.photo is not None
+                               else self.r.compose_style(s.idx, s.style))
+
     def __init__(self, renderer: AsciiRenderer):
         self.r = renderer
         self.subjects: list[_Subject] = []
         self._slot = 0
+        self.style = 0           # session default, cycled with F
 
     # ── lifecycle ──
 
@@ -603,7 +708,11 @@ class SubjectManager:
                         crop = frame[y0:y1, x0:x1].copy()
                         s.photo = crop
                         s.idx = self.r.indices(crop)
-                        s.ascii_img = self.r.compose(s.idx)
+                        s.style = self.style
+                        s.ascii_img = (
+                            self.r.compose_color(s.idx, crop, s.style)
+                            if s.style == STYLE_COLOR
+                            else self.r.compose_style(s.idx, s.style))
                         s.flash = now
                 alive.append(s)
             else:

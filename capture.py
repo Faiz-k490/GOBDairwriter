@@ -118,12 +118,14 @@ class CaptureStore:
         """Records still owed an email, oldest first."""
         return [r for r in self.records if r.get("status") == PENDING]
 
-    def save(self, email, idx_grid, renderer, photo=None):
+    def save(self, email, idx_grid, renderer, photo=None, style=0):
         """Write the portrait + text + index entry.  Returns the record."""
         stamp = datetime.now()
         base = f"{stamp:%Y-%m-%d_%H%M%S}_{len(self.records) + 1:02d}"
 
-        art = renderer.compose(idx_grid, cell=EXPORT_CELL)
+        # Export in whatever style they saw on screen, at export cell size,
+        # so the emailed PNG matches the portrait rather than surprising them.
+        art = renderer.export(idx_grid, style, photo, cell=EXPORT_CELL)
         m = EXPORT_MARGIN
         canvas = np.full((art.shape[0] + m * 2, art.shape[1] + m * 2, 3),
                          art[0, 0], np.uint8)          # match the paper

@@ -36,7 +36,7 @@ def _fps_color(fps):
 
 
 def draw(bar, hands, n_active, palette, rainbow, rainbow_col, ar, rec,
-         thick, fps, n_sub, n_faces):
+         thick, fps, n_sub, n_faces, style=""):
     """Render the header in place.  `bar` is a (HEADER_H, W, 3) strip."""
     H, W = bar.shape[:2]
     bar[:] = BG
@@ -105,6 +105,10 @@ def draw(bar, hands, n_active, palette, rainbow, rainbow_col, ar, rec,
         text(bar, s, (rx + 9, mid - 7), 11, col, tracking=1)
         rx -= 10
 
+    # Only when it is not the default: the header is already tight at 1280,
+    # and a badge that is always there stops being information.
+    if style:
+        badge("STYLE", style, True)
     badge("FACE", n_faces, n_faces > 0)
     badge("LOCK", n_sub, n_sub > 0)
 

@@ -22,6 +22,7 @@ Keyboard:
   Z   Undo             Y   Redo
   A   Toggle AR mode   B   Toggle rainbow mode
   H   Toggle HUD       M   Toggle mirror
+  F   Portrait style   (CLASSIC / BLOCKS / MATRIX / HALFTONE / COLOR)
   C   Clear canvas     Q / ESC   Quit
 """
 
@@ -491,7 +492,7 @@ def main():
     t0_mono = time.monotonic()
 
     print("[✓] Ready!  S=Screenshot  R=Record  Z/Y=Undo/Redo")
-    print("    A=AR  B=Rainbow  H=HUD  M=Mirror  C=Clear  X=Unlock  Q=Quit")
+    print("    A=AR  B=Rainbow  F=Style  H=HUD  M=Mirror  C=Clear  X=Unlock  Q=Quit")
     print("    ◎ Circle a face → portrait freezes → type email → ENTER")
     print("    ☝ Draw  ·  ✌ Color  ·  3 fingers Erase  ·  🖐 Pause")
     print("    ✊ Hold a fist to clear for the next person.")
@@ -692,7 +693,8 @@ def main():
 
         hud.draw(bar, hands, n_hands, PALETTE, rainbow,
                  rainbow_color(hue_t), ar_on, rec, thick, fps,
-                 subjects.active, faces.raw_count)
+                 subjects.active, faces.raw_count,
+                 face_styles[subjects.style][0] if subjects.style else "")
 
         if rec.recording:
             rec.feed(out)
@@ -720,7 +722,7 @@ def main():
                 else:
                     try:
                         r_ = store.save(fld.text, sub_.idx, ascii_r,
-                                        sub_.photo)
+                                        sub_.photo, sub_.style)
                     except OSError as e:
                         # A full disk after a few hundred captures must not
                         # end the demo; the address is still on screen and
@@ -775,6 +777,10 @@ def main():
             ar_on = not ar_on
             if not ar_on: ar_stab.reset()
             print(f"[📌] AR {'ON' if ar_on else 'OFF'}")
+        elif key in (ord("f"), ord("F")):
+            subjects.style = (subjects.style + 1) % len(face_styles)
+            subjects.restyle(subjects.style)
+            print(f"[◈] Style: {face_styles[subjects.style][0]}")
         elif key in (ord("h"), ord("H")):
             hud_on = not hud_on
         elif key in (ord("m"), ord("M")):
