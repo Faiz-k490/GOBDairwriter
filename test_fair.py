@@ -203,6 +203,25 @@ def test_message():
         check("html references the inline image",
               f"cid:{cid['Content-ID'].strip('<>')}" in html)
         check("reply-to is set", m["Reply-To"] == "club@x.org")
+
+        # The mail should read as coming from the club, not from a toy.
+        text = [q for q in m.walk()
+                if q.get_content_type() == "text/plain"][0].get_content()
+        check("subject names the club", "Coding Club" in m["Subject"],
+              m["Subject"])
+        check("plain text carries the GroupMe link",
+              mailer.GROUPME in text)
+        check("plain text says what the club is",
+              "build club at The University of Alabama" in text)
+        for want in (mailer.CRIMSON, mailer.BONE, mailer.GROUPME,
+                     "hackbama.org"):
+            check(f"html carries {want}", want in html)
+        check("no leftover neon-demo palette",
+              "#14121a" not in html and "#8ee6ff" not in html)
+        # Club voice: the site uses no contractions anywhere.
+        bad = [c for c in ("don't", "it's", "you're", "we're", "here's",
+                           "that's") if c in text.lower()]
+        check("copy avoids contractions, like the site", not bad, str(bad))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

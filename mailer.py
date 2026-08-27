@@ -62,59 +62,197 @@ def load_config(path=None):
     return {
         "user": user,
         "password": pw,
-        "from_name": cfg.get("AIRWRITER_FROM_NAME", "Air Writer").strip(),
+        "from_name": cfg.get("AIRWRITER_FROM_NAME", "HackBama").strip(),
         "reply_to": cfg.get("AIRWRITER_REPLY_TO", "").strip() or user,
-        "club": cfg.get("AIRWRITER_CLUB_NAME", "").strip(),
+        "club": cfg.get("AIRWRITER_CLUB_NAME", "HackBama").strip(),
         # Placeholder credentials in .env.example must not read as configured.
         "enabled": bool(enabled and user and pw and "x" * 8 not in pw),
     }
 
 
+# ── HackBama brand ────────────────────────────────────────────────────
+#
+# Taken from the club site (hackbama.org): a warm, editorial, print-inspired
+# palette — bone paper, Alabama crimson, hairline rules, square corners, no
+# shadows and no glow.  Deliberately the opposite of a neon-on-black demo
+# aesthetic, so the mail reads as coming from the club rather than from a toy.
+BONE = "#F1EDE4"          # page background
+PAPER = "#F9F7F1"         # card surface
+INK = "#191715"           # headings
+INK_SOFT = "#5C5751"      # body
+INK_FAINT = "#958D83"     # labels
+CRIMSON = "#8D1B30"       # accent, CTA
+RULE = "#D8D2C9"          # hairline dividers
+
+GROUPME = "https://groupme.com/join_group/105495989/hs26yOC2"
+SITE = "https://hackbama.org"
+
+# Inter Tight and Bodoni Moda are Google Fonts and will not load in Outlook or
+# Gmail webmail, so every stack ends in something universally present.
+SANS = "'Inter Tight',Inter,system-ui,-apple-system,Helvetica,Arial,sans-serif"
+SERIF = "'Bodoni Moda',Georgia,'Times New Roman',serif"
+MONO = "'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace"
+
+
 def build_message(cfg, to_addr, png_path=None, ascii_text="", when=""):
     """Compose the portrait email.  Pure — no network, so it is testable."""
-    club = cfg.get("club") or ""
+    club = cfg.get("club") or "HackBama"
     msg = EmailMessage()
-    msg["Subject"] = "Your ASCII portrait"
-    msg["From"] = formataddr((cfg.get("from_name") or "Air Writer",
-                              cfg["user"]))
+    msg["Subject"] = f"Your portrait, and what {club} actually is"
+    msg["From"] = formataddr((cfg.get("from_name") or club, cfg["user"]))
     msg["To"] = to_addr
     if cfg.get("reply_to"):
         msg["Reply-To"] = cfg["reply_to"]
 
-    made_at = f" at {club}" if club else ""
-    # The ASCII itself is the keepsake, so it goes in the body as text rather
-    # than only as an attachment.
-    body = (
-        "Here's your portrait.\n\n"
-        "A webcam found your face, you drew a circle around it in the air, "
-        f"and a program turned it into letters{made_at}.\n\n"
-        "The full-size image is attached. The text version:\n\n"
-        f"{ascii_text}\n\n"
-        "-- \nMade with Air Writer, a hand-tracking drawing toy "
-        "(Python + OpenCV + MediaPipe).\n"
-    )
+    # The club voice: short declarative sentences, no contractions, no hype,
+    # no exclamation points.  Matched here so the mail sounds like the site.
+    body = f"""\
+{club.upper()}
+The build club at The University of Alabama.
+
+Here is your portrait.
+
+You drew a circle in the air and a webcam turned your face into letters.
+That is roughly 800 lines of Python — hand tracking, a gesture that knows a
+closed loop from a stray scribble, and a renderer that measures the ink
+coverage of every glyph so the shading does not band. A student wrote it. That
+is the entire point of the booth.
+
+Nobody is missing talent. They are missing a door.
+
+Twice a month we put students in a room and ship something before they leave
+it. Tool sessions, skill nights, and every third meeting a mini-hackathon:
+two hours from scratch, or one hour with AI wide open. You leave with
+something that runs. That is the entire bar.
+
+No application, no experience bar, no dues. Freshmen welcome. Come to one
+night and decide from there.
+
+Join the GroupMe: {GROUPME}
+{SITE}
+
+Your portrait is attached. The text version:
+
+{ascii_text}
+
+--
+{club} · The University of Alabama
+A proposed student organization of the Department of Computer Science.
+"""
     msg.set_content(body)
 
     cid = make_msgid()[1:-1]
     esc = (ascii_text.replace("&", "&amp;").replace("<", "&lt;")
            .replace(">", "&gt;"))
+    captured = (f'<div style="font-family:{MONO};font-size:11px;'
+                f'letter-spacing:.12em;text-transform:uppercase;'
+                f'color:{INK_FAINT};margin:0 0 6px">Captured {when}</div>'
+                if when else "")
+
     msg.add_alternative(f"""\
-<html><body style="margin:0;padding:24px;background:#14121a;
- font-family:-apple-system,Helvetica,Arial,sans-serif;color:#e8e6ef">
-<div style="max-width:640px;margin:0 auto">
-  <h1 style="font-size:20px;letter-spacing:.14em;font-weight:600;
-   color:#8ee6ff;margin:0 0 6px">YOUR ASCII PORTRAIT</h1>
-  <p style="color:#a9a5bd;font-size:14px;line-height:1.6;margin:0 0 20px">
-   A webcam found your face, you drew a circle around it in the air, and a
-   program turned it into letters{made_at}.</p>
-  <img src="cid:{cid}" alt="Your portrait in ASCII"
-   style="width:100%;border-radius:10px;display:block;background:#eceae6">
-  <pre style="margin:22px 0 0;padding:16px;background:#0d0b12;color:#c9c5da;
-   border-radius:10px;overflow-x:auto;font-size:5px;line-height:1.05">{esc}</pre>
-  <p style="color:#6f6b85;font-size:12px;margin:22px 0 0">
-   Made with Air Writer — Python, OpenCV and MediaPipe.{
-   ' Captured ' + when if when else ''}</p>
-</div></body></html>""", subtype="html")
+<html><body style="margin:0;padding:0;background:{BONE};
+ font-family:{SANS};color:{INK_SOFT};-webkit-font-smoothing:antialiased">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+ border="0" style="background:{BONE}"><tr><td align="center"
+ style="padding:32px 16px">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0"
+ border="0" style="width:600px;max-width:600px">
+
+  <tr><td style="padding:0 0 18px">
+    <div style="font-family:{SERIF};font-weight:700;font-size:22px;
+     letter-spacing:.12em;color:{INK}">{club.upper()}</div>
+    <div style="font-size:13px;color:{INK_FAINT};margin-top:4px">
+      The build club at The University of Alabama</div>
+  </td></tr>
+
+  <tr><td style="border-top:1px solid {RULE};padding:26px 0 0">
+    {captured}
+    <h1 style="margin:0 0 14px;font-size:30px;line-height:1.08;
+     letter-spacing:-.03em;font-weight:600;color:{INK}">
+      Here is your portrait.</h1>
+    <p style="margin:0 0 22px;font-size:16px;line-height:1.625;
+     color:{INK_SOFT}">
+      You drew a circle in the air and a webcam turned your face into
+      letters.</p>
+  </td></tr>
+
+  <tr><td style="padding:0 0 26px">
+    <img src="cid:{cid}" alt="Your portrait, rendered in ASCII" width="600"
+     style="width:100%;max-width:600px;display:block;border:1px solid {RULE};
+     background:{PAPER}"></td></tr>
+
+  <tr><td style="background:{PAPER};border:1px solid {RULE};
+   padding:26px 28px">
+    <div style="font-family:{MONO};font-size:11px;letter-spacing:.12em;
+     text-transform:uppercase;color:{INK_FAINT};margin:0 0 10px">
+      How it was made</div>
+    <p style="margin:0;font-size:15px;line-height:1.65;color:{INK_SOFT}">
+      Roughly 800 lines of Python — hand tracking, a gesture that knows a
+      closed loop from a stray scribble, and a renderer that measures the ink
+      coverage of every glyph so the shading does not band. A student wrote
+      it. That is the entire point of the booth.</p>
+  </td></tr>
+
+  <tr><td style="padding:34px 0 0">
+    <h2 style="margin:0 0 12px;font-size:23px;line-height:1.1;
+     letter-spacing:-.03em;font-weight:600;color:{INK}">
+      Nobody is missing talent. They are missing a door.</h2>
+    <p style="margin:0 0 18px;font-size:16px;line-height:1.625;
+     color:{INK_SOFT}">
+      Twice a month we put students in a room and ship something before they
+      leave it. Tool sessions, skill nights, and every third meeting a
+      mini-hackathon: two hours from scratch, or one hour with AI wide open.
+      You leave with something that runs. That is the entire bar.</p>
+  </td></tr>
+
+  <tr><td style="padding:0 0 30px">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+     width="100%" style="border-collapse:separate">
+      <tr>
+        <td width="8" style="background:{CRIMSON};font-size:0;
+         line-height:0">&nbsp;</td>
+        <td style="background:{PAPER};border:1px solid {RULE};
+         border-left:0;padding:16px 20px;font-size:15px;line-height:1.6;
+         color:{INK_SOFT}">
+          No application, no experience bar, no dues. Freshmen welcome. Come
+          to one night and decide from there.</td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="padding:0 0 34px">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+      <tr><td style="background:{CRIMSON}">
+        <a href="{GROUPME}" style="display:inline-block;padding:15px 34px;
+         font-family:{SANS};font-size:16px;font-weight:500;color:{PAPER};
+         text-decoration:none">Join the GroupMe</a>
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="border-top:1px solid {RULE};padding:22px 0 0">
+    <div style="font-family:{MONO};font-size:11px;letter-spacing:.12em;
+     text-transform:uppercase;color:{INK_FAINT};margin:0 0 10px">
+      Your portrait as text</div>
+    <div style="background:{PAPER};border:1px solid {RULE};padding:14px;
+     overflow-x:auto">
+      <pre style="margin:0;font-family:{MONO};font-size:4px;line-height:1.02;
+       color:{INK};white-space:pre">{esc}</pre></div>
+  </td></tr>
+
+  <tr><td style="border-top:1px solid {RULE};margin-top:26px;
+   padding:22px 0 0">
+    <p style="margin:26px 0 0;font-size:13px;line-height:1.6;
+     color:{INK_FAINT}">
+      <a href="{SITE}" style="color:{CRIMSON};text-decoration:none">
+        hackbama.org</a><br>
+      The University of Alabama · A proposed student organization of the
+      Department of Computer Science.<br>
+      You are receiving this because you asked for your portrait at our
+      booth.</p>
+  </td></tr>
+
+</table></td></tr></table></body></html>""", subtype="html")
 
     if png_path and Path(png_path).exists():
         data = Path(png_path).read_bytes()
