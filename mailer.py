@@ -275,6 +275,19 @@ class _Permanent(Exception):
     """A failure that retrying cannot fix (bad auth, refused address)."""
 
 
+def _is_permanent_failure(error):
+    # SMTP 4xx replies are temporary even when smtplib raises an auth/sender/
+    # recipient exception. Only 5xx replies should bypass the retry schedule.
+    if isinstance(error, _Permanent):
+        return True
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return bool(error.recipients) and all(
+            500 <= code < 600 for code, _ in error.recipients.values())
+    if isinstance(error, smtplib.SMTPResponseException):
+        return 500 <= error.smtp_code < 600
+    return False
+
+
 def send_once(cfg, msg, transport=None):
     """Send one message.  `transport` is injectable so tests stay offline."""
     if transport is not None:
@@ -362,16 +375,11 @@ class EmailSender:
                 send_once(self.cfg, msg, self._transport)
                 self._out.put((job["id"], "sent", "", attempt))
                 return
-            except (smtplib.SMTPAuthenticationError,
-                    smtplib.SMTPRecipientsRefused,
-                    smtplib.SMTPSenderRefused, _Permanent) as e:
-                # Retrying a rejected password or a refused address just burns
-                # the daily quota and delays the real diagnosis.
-                self._out.put((job["id"], "failed",
-                               f"{type(e).__name__}: {e}", attempt))
-                return
             except Exception as e:
                 last = f"{type(e).__name__}: {e}"
+                if _is_permanent_failure(e):
+                    self._out.put((job["id"], "failed", last, attempt))
+                    return
                 if attempt > len(self._backoff):
                     break
                 delay = self._backoff[attempt - 1]
