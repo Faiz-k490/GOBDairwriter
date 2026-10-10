@@ -59,12 +59,16 @@ class CaptureStore:
             return []
         try:
             data = json.loads(self.index.read_text())
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError):
+            if not isinstance(data, list) or any(not isinstance(record, dict) for record in data):
+                raise ValueError("capture index must be an array of record objects")
+            return data
+        except (ValueError, OSError):
             # Never lose a demo's worth of addresses to a bad parse — keep
-            # the old file aside and start a fresh index.
+            # the old file aside and start a fresh index. ValueError also
+            # covers decoding failures and valid JSON with an invalid shape.
+            # A unique suffix preserves earlier recoveries in the same second.
             self.index.rename(self.index.with_suffix(
-                f".corrupt-{int(time.time())}.json"))
+                f".corrupt-{int(time.time())}-{uuid.uuid4().hex}.json"))
             return []
 
     def _write_index(self):
